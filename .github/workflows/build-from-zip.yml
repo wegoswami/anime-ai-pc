@@ -1,0 +1,85 @@
+name: Build Windows installer (from zip)
+
+on:
+  workflow_dispatch:                 # "Run workflow" button
+  push:
+    paths: ["HybridAnimeAI-project.zip"]   # building starts by itself when you upload the zip
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack the project zip
+        shell: pwsh
+        run: |
+          if (-not (Test-Path HybridAnimeAI-project.zip)) { throw "HybridAnimeAI-project.zip not found in the repo root" }
+          Expand-Archive HybridAnimeAI-project.zip -DestinationPath _unz -Force
+          $spec = Get-ChildItem _unz -Recurse -Filter HybridAnimeAI.spec | Select-Object -First 1
+          if (-not $spec) { throw "HybridAnimeAI.spec not found inside the zip" }
+          Move-Item $spec.DirectoryName proj
+          Get-ChildItem proj | Select-Object -First 20 | ForEach-Object { $_.Name }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: proj
+        run: pip install -r requirements-build.txt
+
+      - name: Tell the app which GitHub repo publishes its updates
+        working-directory: proj
+        shell: bash
+        run: printf 'GITHUB_REPO = "%s"\n' "${{ github.repository }}" > app/build_info.py
+
+      - name: Create icon
+        working-directory: proj
+        run: python tools/make_placeholder_gifs.py
+
+      - name: Build updater.exe
+        working-directory: proj
+        run: pyinstaller --noconfirm --clean updater.spec
+
+      - name: Build main app
+        working-directory: proj
+        run: pyinstaller --noconfirm --clean HybridAnimeAI.spec
+
+      - name: Add updater to app folder
+        working-directory: proj
+        run: Copy-Item dist\updater.exe dist\HybridAnimeAI\updater.exe
+
+      - name: Create OTA package and version.json
+        working-directory: proj
+        run: python tools/make_release.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        working-directory: proj
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss'
+
+      - name: Upload installer (download from the run page -> Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: HybridAnimeAI-installer
+          path: proj/release/*
+
+      - name: Read app version
+        id: ver
+        working-directory: proj
+        shell: bash
+        run: echo "v=$(python -c "import re;print(re.search(r'APP_VERSION = \"([^\"]+)\"',open('app/version.py').read()).group(1))")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release (installer + auto-update files)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.v }}
+          name: Hybrid Anime AI ${{ steps.ver.outputs.v }}
+          make_latest: true
+          files: proj/release/*
